@@ -55,7 +55,7 @@ Bridge Planning Center Giving data (Stripe payouts, committed batches, and Regis
 - **Stripe (online donations)**: preview `run-sync-preview.php`; sync `run-sync.php` (supports `reset_window`/`backfill_days`).
 - **Committed batches (cash/check)**: preview `run-batch-preview.php`; sync `run-batch-sync.php`.
 - **Registrations**: preview `run-registrations-preview.php`; sync `run-registrations-sync.php`. Refunds post as expenses to the configured refund account (or income fallback) with class/department applied.
-- **Fund mappings**: `fund-mapping.php` maps PCO fund → QBO Class/Location.
+- **Fund mappings**: `fund-mapping.php` maps PCO fund → QBO Class/Location/Income Account.
 - **Settings**: `settings.php` for account names, notification email, refund account, and display timezone.
 - **Logs**: `logs.php` for recent sync runs.
 - **Webhook (optional)**: PCO `giving.v2.events.batch.created` can trigger registrations sync via shared secret in `webhook_secrets`.

@@ -747,6 +747,12 @@ try {
     $errors[] = 'Error looking up QBO accounts: ' . $e->getMessage();
 }
 
+// Cache default income account; overrides can reuse the QBO client cache too.
+$incomeAccountsByName = [];
+if (!empty($incomeAccount)) {
+    $incomeAccountsByName[$weeklyIncomeName] = $incomeAccount;
+}
+
 // --- Group funds by Location (one Deposit per Location) ----------------------
 
 $locationGroups = [];
@@ -802,6 +808,7 @@ if (empty($errors)) {
         foreach ($group['funds'] as $fundRow) {
             $fundName  = $fundRow['pco_fund_name'];
             $className = $fundRow['qbo_class_name'];
+            $fundIncomeName = trim((string)($fundRow['qbo_income_account_name'] ?? ''));
             $paymentMethods = $fundRow['payment_methods'] ?? [];
 
             $classId = null;
@@ -819,6 +826,21 @@ if (empty($errors)) {
                 }
             }
 
+            $incomeName = $fundIncomeName !== '' ? $fundIncomeName : $weeklyIncomeName;
+            $fundIncomeAccount = $incomeAccountsByName[$incomeName] ?? null;
+            if ($fundIncomeAccount === null) {
+                try {
+                    $fundIncomeAccount = $qbo->getAccountByName($incomeName, true);
+                } catch (Throwable $e) {
+                    $fundIncomeAccount = null;
+                }
+                $incomeAccountsByName[$incomeName] = $fundIncomeAccount;
+            }
+            if (!$fundIncomeAccount) {
+                $errors[] = "Could not find income account for fund '{$fundName}' (expected: '{$incomeName}').";
+                continue 2;
+            }
+
             $gross = (float)$fundRow['gross'];
             $fee   = (float)$fundRow['fee'];
 
@@ -827,8 +849,8 @@ if (empty($errors)) {
                 'DetailType' => 'DepositLineDetail',
                 'DepositLineDetail' => [
                     'AccountRef' => [
-                        'value' => (string)$incomeAccount['Id'],
-                        'name'  => $incomeAccount['Name'] ?? $weeklyIncomeName,
+                        'value' => (string)$fundIncomeAccount['Id'],
+                        'name'  => $fundIncomeAccount['Name'] ?? $incomeName,
                     ],
                 ],
             ];

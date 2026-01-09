@@ -400,6 +400,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
                         <th>PCO Fund</th>
                         <th>QBO Class</th>
                         <th>QBO Location</th>
+                        <th>QBO Income Account</th>
                         <th>Gross</th>
                         <th>Stripe Fee</th>
                         <th>Net</th>
@@ -414,6 +415,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
                             </td>
                             <td><?= htmlspecialchars((string)$row['qbo_class_name'], ENT_QUOTES, 'UTF-8') ?></td>
                             <td><?= htmlspecialchars((string)$row['qbo_location_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= htmlspecialchars((string)($row['qbo_income_account_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?></td>
                             <td>$<?= number_format($row['gross'], 2) ?></td>
                             <td>$<?= number_format($row['fee'], 2) ?></td>
                             <td>$<?= number_format($row['net'], 2) ?></td>
@@ -422,7 +424,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
                     </tbody>
                     <tfoot>
                     <tr>
-                        <th colspan="3">Totals</th>
+                        <th colspan="4">Totals</th>
                         <th>$<?= number_format($preview['total_gross'], 2) ?></th>
                         <th>$<?= number_format($preview['total_fee'], 2) ?></th>
                         <th>$<?= number_format($preview['total_net'], 2) ?></th>
@@ -527,7 +529,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
 
     <p class="muted footnote">
         Once this preview matches your Stripe payout report for the same period, these per-fund gross and fee totals will flow into a QuickBooks Online deposit:
-        one income line and one fee line per fund into your configured bank account, using the mapped Class and Location.
+        one income line and one fee line per fund into your configured bank account, using the mapped Class, Location, and Income Account.
     </p>
     <div class="footer">
         &copy; <?= date('Y') ?> Rev. Tommy Sheppard ? <a href="help.php">Help</a>

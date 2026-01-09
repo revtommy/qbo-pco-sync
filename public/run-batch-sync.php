@@ -807,6 +807,11 @@ try {
     $errors[] = 'Error looking up QBO accounts: ' . $e->getMessage();
 }
 
+$incomeAccountsByName = [];
+if (!empty($incomeAccount)) {
+    $incomeAccountsByName[$incomeAccountName] = $incomeAccount;
+}
+
 $fundMappings = [];
 try {
     $stmt = $pdo->query('SELECT * FROM fund_mappings');
@@ -927,9 +932,10 @@ foreach ($batches as $batchInfo) {
 
             $amount = $amountCents / 100.0;
 
-            $mapping   = $fundMappings[$fundId] ?? [];
-            $locName   = trim((string)($mapping['qbo_location_name'] ?? ''));
-            $className = trim((string)($mapping['qbo_class_name'] ?? ''));
+            $mapping    = $fundMappings[$fundId] ?? [];
+            $locName    = trim((string)($mapping['qbo_location_name'] ?? ''));
+            $className  = trim((string)($mapping['qbo_class_name'] ?? ''));
+            $incomeName = trim((string)($mapping['qbo_income_account_name'] ?? ''));
 
             $fundName = (string)(
                 $mapping['pco_fund_name']
@@ -957,6 +963,7 @@ foreach ($batches as $batchInfo) {
                     'pco_fund_id'    => $fundId,
                     'pco_fund_name'  => $fundName,
                     'qbo_class_name' => $className,
+                    'qbo_income_account_name' => $incomeName,
                     'gross'          => 0.0,
                     'method_totals'  => [],
                 ];
@@ -1016,6 +1023,7 @@ foreach ($batches as $batchInfo) {
         foreach ($funds as $fundRow) {
             $fundName  = $fundRow['pco_fund_name'];
             $className = $fundRow['qbo_class_name'];
+            $fundIncomeName = trim((string)($fundRow['qbo_income_account_name'] ?? ''));
             $methodTotals = $fundRow['method_totals'] ?? [];
 
             $classId = null;
@@ -1043,13 +1051,29 @@ foreach ($batches as $batchInfo) {
                     continue;
                 }
 
+                $incomeName = $fundIncomeName !== '' ? $fundIncomeName : $incomeAccountName;
+                $fundIncomeAccount = $incomeAccountsByName[$incomeName] ?? null;
+                if ($fundIncomeAccount === null) {
+                    try {
+                        $fundIncomeAccount = $qbo->getAccountByName($incomeName, true);
+                    } catch (Throwable $e) {
+                        $fundIncomeAccount = null;
+                    }
+                    $incomeAccountsByName[$incomeName] = $fundIncomeAccount;
+                }
+                if (!$fundIncomeAccount) {
+                    $errors[] = "Could not find income account for fund '{$fundName}' (batch {$batchId}): {$incomeName}";
+                    $batchHadErrors = true;
+                    continue 3;
+                }
+
                 $line = [
                     'Amount'     => $gross,
                     'DetailType' => 'DepositLineDetail',
                     'DepositLineDetail' => [
                         'AccountRef' => [
-                            'value' => (string)$incomeAccount['Id'],
-                            'name'  => $incomeAccount['Name'] ?? $incomeAccountName,
+                            'value' => (string)$fundIncomeAccount['Id'],
+                            'name'  => $fundIncomeAccount['Name'] ?? $incomeName,
                         ],
                     ],
                     'Description' => $fundName . ' (' . ($pmRaw !== '' ? $pmRaw : 'unspecified') . ') donations (Batch ' . $batchId . ')',

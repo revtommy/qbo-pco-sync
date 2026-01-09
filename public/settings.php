@@ -696,6 +696,7 @@ $lastBatchDisplay      = format_display_time($lastBatchCompletedAt, $displayTime
                 >
                 <div class="hint">
                     Used for gross donation lines (for example: <code>OPERATING INCOME:WEEKLY OFFERINGS:PLEDGES</code>).
+                    Use <a href="fund-mapping.php">Fund mapping</a> to override this per fund.
                 </div>
             </div>
 

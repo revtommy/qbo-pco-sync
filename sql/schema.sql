@@ -24,6 +24,7 @@ CREATE TABLE `fund_mappings` (
   `pco_fund_name` varchar(255) COLLATE utf8mb4_general_ci NOT NULL,
   `qbo_class_name` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `qbo_location_name` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `qbo_income_account_name` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

@@ -40,12 +40,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $stmt = $pdo->prepare(
-            "INSERT INTO fund_mappings (pco_fund_id, pco_fund_name, qbo_class_name, qbo_location_name)
-             VALUES (:pco_fund_id, :pco_fund_name, :qbo_class_name, :qbo_location_name)
+            "INSERT INTO fund_mappings (pco_fund_id, pco_fund_name, qbo_class_name, qbo_location_name, qbo_income_account_name)
+             VALUES (:pco_fund_id, :pco_fund_name, :qbo_class_name, :qbo_location_name, :qbo_income_account_name)
              ON DUPLICATE KEY UPDATE
                pco_fund_name = VALUES(pco_fund_name),
                qbo_class_name = VALUES(qbo_class_name),
                qbo_location_name = VALUES(qbo_location_name),
+               qbo_income_account_name = VALUES(qbo_income_account_name),
                updated_at = CURRENT_TIMESTAMP"
         );
 
@@ -54,16 +55,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pcoFundName = trim((string)($row['pco_fund_name'] ?? ''));
             $className   = trim((string)($row['qbo_class_name'] ?? ''));
             $locName     = trim((string)($row['qbo_location_name'] ?? ''));
+            $incomeName  = trim((string)($row['qbo_income_account_name'] ?? ''));
 
             if ($pcoFundId === '' || $pcoFundName === '') {
                 continue;
             }
 
             $stmt->execute([
-                ':pco_fund_id'       => $pcoFundId,
-                ':pco_fund_name'     => $pcoFundName,
-                ':qbo_class_name'    => $className !== '' ? $className : null,
-                ':qbo_location_name' => $locName !== '' ? $locName : null,
+                ':pco_fund_id'            => $pcoFundId,
+                ':pco_fund_name'          => $pcoFundName,
+                ':qbo_class_name'         => $className !== '' ? $className : null,
+                ':qbo_location_name'      => $locName !== '' ? $locName : null,
+                ':qbo_income_account_name'=> $incomeName !== '' ? $incomeName : null,
             ]);
         }
 
@@ -99,7 +102,7 @@ try {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Fund &rarr; QBO Class/Location Mapping</title>
+    <title>Fund &rarr; QBO Mapping</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700&display=swap');
         :root {
@@ -333,7 +336,7 @@ try {
         <div>
             <div class="eyebrow">Mappings</div>
             <h1>Fund to QBO mapping</h1>
-            <p class="lede">Assign QuickBooks Class and Location names for each Planning Center fund before syncing deposits.</p>
+            <p class="lede">Assign QuickBooks Class, Location, and Income Account names for each Planning Center fund before syncing deposits.</p>
         </div>
         <a class="btn secondary" href="index.php">&larr; Back to dashboard</a>
     </div>
@@ -357,7 +360,7 @@ try {
             <div class="section-header">
                 <div>
                     <p class="eyebrow" style="margin-bottom: 0.35rem;">Fund mapping</p>
-                    <p class="section-title">Class and location targets</p>
+                    <p class="section-title">Class, location, and income targets</p>
                     <p class="section-sub">Use the exact QuickBooks names to avoid sync errors.</p>
                 </div>
                 <button type="submit" class="btn">Save mappings</button>
@@ -367,10 +370,11 @@ try {
                 <table>
                     <thead>
                     <tr>
-                        <th style="width: 15%;">PCO Fund ID</th>
-                        <th style="width: 30%;">PCO Fund Name</th>
-                        <th style="width: 27%;">QBO Class Name<br><span class="small">e.g. Trinity - General</span></th>
-                        <th style="width: 28%;">QBO Location Name<br><span class="small">e.g. Moundsville</span></th>
+                        <th style="width: 13%;">PCO Fund ID</th>
+                        <th style="width: 24%;">PCO Fund Name</th>
+                        <th style="width: 20%;">QBO Class Name<br><span class="small">e.g. Trinity - General</span></th>
+                        <th style="width: 20%;">QBO Location Name<br><span class="small">e.g. Moundsville</span></th>
+                        <th style="width: 23%;">QBO Income Account<br><span class="small">e.g. OPERATING INCOME:WEEKLY OFFERINGS:PLEDGES</span></th>
                     </tr>
                     </thead>
                     <tbody>
@@ -405,6 +409,11 @@ try {
                                        name="fund[<?= htmlspecialchars($fid, ENT_QUOTES, 'UTF-8') ?>][qbo_location_name]"
                                        value="<?= htmlspecialchars($map['qbo_location_name'] ?? '', ENT_QUOTES, 'UTF-8') ?>">
                             </td>
+                            <td>
+                                <input type="text"
+                                       name="fund[<?= htmlspecialchars($fid, ENT_QUOTES, 'UTF-8') ?>][qbo_income_account_name]"
+                                       value="<?= htmlspecialchars($map['qbo_income_account_name'] ?? '', ENT_QUOTES, 'UTF-8') ?>">
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
@@ -412,7 +421,7 @@ try {
             </div>
 
             <div class="small" style="margin-top: 0.65rem;">
-                These mappings are used when creating deposits in QuickBooks. Leave Class or Location blank if you do not use them.
+                These mappings are used when creating deposits in QuickBooks. Leave Class, Location, or Income blank to use defaults.
             </div>
 
             <div class="actions">

@@ -630,7 +630,7 @@ if (file_exists($mailStatusFile)) {
                     <span class="desc">Edit QBO accounts and notification email preferences.</span>
                 </a>
                 <a class="tile" href="fund-mapping.php">
-                    <span class="title">Fund &rarr; Class/Location</span>
+                    <span class="title">Fund &rarr; Class/Location/Income</span>
                     <span class="desc">Maintain mapping rules so deposits land in the right QBO buckets.</span>
                 </a>
             </div>

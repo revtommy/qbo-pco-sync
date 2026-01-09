@@ -584,9 +584,10 @@ foreach ($batches as $batch) {
             }
 
             $mapping   = $fundMappings[$fundId] ?? [];
-            $fundName  = $mapping['pco_fund_name'] ?? ('Fund ' . $fundId);
-            $className = $mapping['qbo_class_name'] ?? '';
-            $locName   = $mapping['qbo_location_name'] ?? '';
+            $fundName   = $mapping['pco_fund_name'] ?? ('Fund ' . $fundId);
+            $className  = $mapping['qbo_class_name'] ?? '';
+            $locName    = $mapping['qbo_location_name'] ?? '';
+            $incomeName = $mapping['qbo_income_account_name'] ?? '';
 
             if (!isset($fundTotals[$fundId])) {
                 $fundTotals[$fundId] = [
@@ -594,6 +595,7 @@ foreach ($batches as $batch) {
                     'pco_fund_name'    => $fundName,
                     'qbo_class_name'   => $className,
                     'qbo_location_name'=> $locName,
+                    'qbo_income_account_name' => $incomeName,
                     'gross'            => 0.0,
                     'batch_ids'        => [],
                 ];
@@ -678,6 +680,7 @@ ob_start();
                     <th>PCO Fund</th>
                     <th>QBO Class</th>
                     <th>QBO Location</th>
+                    <th>QBO Income Account</th>
                     <th>Batch ID(s)</th>
                     <th>Gross</th>
                 </tr>
@@ -691,6 +694,7 @@ ob_start();
                         </td>
                         <td><?= htmlspecialchars((string)$row['qbo_class_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars((string)$row['qbo_location_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars((string)($row['qbo_income_account_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(implode(', ', $row['batch_ids'] ?? []), ENT_QUOTES, 'UTF-8') ?></td>
                         <td>$<?= number_format($row['gross'], 2) ?></td>
                     </tr>
@@ -698,7 +702,7 @@ ob_start();
                 </tbody>
                 <tfoot>
                 <tr>
-                    <th colspan="4">Totals</th>
+                    <th colspan="5">Totals</th>
                     <th>$<?= number_format($grossTotal, 2) ?></th>
                 </tr>
                 </tfoot>
@@ -712,7 +716,7 @@ ob_start();
         <div class="section-header">
             <div>
                 <p class="section-title">Unmapped funds</p>
-                <p class="section-sub">Add Class/Location mappings before syncing.</p>
+                <p class="section-sub">Add fund mappings before syncing.</p>
             </div>
         </div>
         <div class="table-wrap">
@@ -737,7 +741,7 @@ ob_start();
 <?php endif; ?>
 
 <p class="muted footnote">
-    This preview totals committed batch donations (cash/check) by fund, using your current Class and Location mappings from the database.
+    This preview totals committed batch donations (cash/check) by fund, using your current Class, Location, and Income Account mappings from the database.
     Use it to reconcile before running the batch sync to QuickBooks.
 </p>
 <div class="footer">

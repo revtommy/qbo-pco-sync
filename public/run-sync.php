@@ -588,73 +588,38 @@ $displayTz = get_display_timezone($pdo);
 $nowUtc = new DateTimeImmutable('now', new DateTimeZone('UTC'));
 $dryRun = isset($_GET['dry_run']) && $_GET['dry_run'] === '1';
 $lastSyncStr  = get_setting($pdo, 'last_completed_at');
-$backfillDays = isset($_GET['backfill_days']) ? max(1, min(90, (int)$_GET['backfill_days'])) : 7;
+$backfillDays = isset($_GET['backfill_days']) ? max(1, min(365, (int)$_GET['backfill_days'])) : 7;
 $resetWindow  = isset($_GET['reset_window']) && $_GET['reset_window'] === '1';
 $defaultSince = $nowUtc->sub(new DateInterval('P' . $backfillDays . 'D'));
+$cursorOverlap = new DateInterval('P14D');
 
 if ($resetWindow) {
     $sinceUtc = $defaultSince;
 } elseif ($lastSyncStr === null) {
-    set_setting($pdo, 'last_completed_at', $nowUtc->format(DateTimeInterface::ATOM));
-    finish_log(
-        $logger,
-        $logId,
-        'success',
-        'Initialized Stripe sync window (no donations imported).',
-        null
-    );
-
-    ob_start();
-    ?>
-    <div class="card">
-        <div class="section-header">
-            <div>
-                <p class="section-title">First run</p>
-                <p class="section-sub">We recorded the current time as the starting point for future syncs.</p>
-            </div>
-        </div>
-        <p class="muted">
-            No historical donations were imported. Starting from
-            <strong><?= htmlspecialchars($nowUtc->format('Y-m-d H:i:s T'), ENT_QUOTES, 'UTF-8') ?></strong>.
-        </p>
-        <p class="muted">Need to sweep past days? <a href="?reset_window=1&backfill_days=7">Re-run last 7 days</a></p>
-    </div>
-    <?php
-    $content = ob_get_clean();
-    renderLayout('PCO -> QBO Sync', 'PCO -> QBO Sync', 'Initialize sync window', $content);
-    exit;
+    // A first run must include the event that triggered it. Per-donation
+    // idempotency makes this bounded initial backfill safe.
+    $sinceUtc = $defaultSince;
 }
 
 if (!isset($sinceUtc)) {
     try {
         $sinceUtc = new DateTimeImmutable($lastSyncStr);
     } catch (Throwable $e) {
-        set_setting($pdo, 'last_completed_at', $nowUtc->format(DateTimeInterface::ATOM));
+        $sinceUtc = $defaultSince;
         finish_log(
             $logger,
             $logId,
-            'error',
-            'Invalid last_completed_at value; reset to now for Stripe sync.',
+            'partial',
+            'Invalid Stripe cursor; using the default backfill window.',
             $e->getMessage()
         );
-
-        ob_start();
-        ?>
-        <div class="flash error">
-            <span class="tag">Issue</span>
-            <div><strong>Invalid last_completed_at value was stored.</strong> We reset it to now without importing any donations.</div>
-        </div>
-        <div class="card">
-            <p class="muted">
-                New value:
-                <strong><?= htmlspecialchars($nowUtc->format('Y-m-d H:i:s T'), ENT_QUOTES, 'UTF-8') ?></strong>
-            </p>
-        </div>
-        <?php
-        $content = ob_get_clean();
-        renderLayout('PCO -> QBO Sync', 'PCO -> QBO Sync', 'Invalid sync window', $content);
-        exit;
     }
+}
+
+// PCO often applies Stripe payout and fee updates days after completed_at.
+// Re-read a safe overlap and let synced_items provide per-donation idempotency.
+if (!$resetWindow && $lastSyncStr !== null) {
+    $sinceUtc = $sinceUtc->sub($cursorOverlap);
 }
 
 if ($sinceUtc >= $nowUtc) {
@@ -680,14 +645,18 @@ try {
     exit;
 }
 
-// If there are no funds to deposit, simply move the window forward.
+// If there are no funds to deposit, simply move the update cursor forward.
 if (empty($preview['funds']) && empty($refundPreview['refunds'])) {
-    set_setting($pdo, 'last_completed_at', $nowUtc->format(DateTimeInterface::ATOM));
+    if (!$dryRun) {
+        set_setting($pdo, 'last_completed_at', $nowUtc->format(DateTimeInterface::ATOM));
+    }
     finish_log(
         $logger,
         $logId,
         'success',
-        'No eligible Stripe donations or refunds; window advanced.',
+        $dryRun
+            ? 'Dry run: no eligible Stripe donations or refunds; cursor unchanged.'
+            : 'No eligible Stripe donations or refunds; window advanced.',
         null
     );
 
@@ -699,9 +668,13 @@ if (empty($preview['funds']) && empty($refundPreview['refunds'])) {
     </div>
     <div class="card">
         <p class="muted">
-            Last completed sync window is now set to
-            <strong><?= htmlspecialchars($nowUtc->format('Y-m-d H:i:s T'), ENT_QUOTES, 'UTF-8') ?></strong>
-            (based on completed_at).
+            <?php if ($dryRun): ?>
+                Dry run: the saved sync cursor remains unchanged.
+            <?php else: ?>
+                Last completed sync window is now set to
+                <strong><?= htmlspecialchars($nowUtc->format('Y-m-d H:i:s T'), ENT_QUOTES, 'UTF-8') ?></strong>
+                (based on updated_at, with a 14-day overlap on the next run).
+            <?php endif; ?>
         </p>
     </div>
     <?php
@@ -753,37 +726,46 @@ if (!empty($incomeAccount)) {
     $incomeAccountsByName[$weeklyIncomeName] = $incomeAccount;
 }
 
-// --- Group funds by Location (one Deposit per Location) ----------------------
+// --- Group by payout date and fund (one Deposit per payout/fund) ------------
 
-$locationGroups = [];
+$depositGroups = [];
+$requiredGroupsByDonation = [];
+$incompleteDonationSet = array_fill_keys($preview['incomplete_donation_ids'] ?? [], true);
 
 foreach ($preview['funds'] as $row) {
-    $locName = trim((string)($row['qbo_location_name'] ?? ''));
-            $locKey  = $locName !== '' ? $locName : '__NO_LOCATION__';
+    $locName    = trim((string)($row['qbo_location_name'] ?? ''));
+    $locKey     = $locName !== '' ? $locName : '__NO_LOCATION__';
+    $payoutDate = (string)($row['payout_date'] ?? $nowUtc->format('Y-m-d'));
+    $fundId     = (string)($row['pco_fund_id'] ?? '');
+    $groupKey   = $payoutDate . '|' . $fundId . '|' . $locKey;
 
-            if (!isset($locationGroups[$locKey])) {
-                $locationGroups[$locKey] = [
-                    'location_name' => $locName,
-                    'funds'         => [],
-                    'total_gross'   => 0.0,
-                    'total_fee'     => 0.0,
-                    'total_net'     => 0.0,
-                    'donation_ids'  => $preview['donation_ids_by_location'][$locKey] ?? [],
-                ];
-            }
+    $depositGroups[$groupKey] = [
+        'payout_date'  => $payoutDate,
+        'fund_id'      => $fundId,
+        'fund_name'    => (string)($row['pco_fund_name'] ?? ('Fund ' . $fundId)),
+        'location_name'=> $locName,
+        'funds'        => [$row],
+        'total_gross'  => (float)$row['gross'],
+        'total_fee'    => (float)$row['fee'],
+        'total_net'    => (float)$row['net'],
+        'donation_ids' => $row['donation_ids'] ?? [],
+    ];
 
-    $locationGroups[$locKey]['funds'][]      = $row;
-    $locationGroups[$locKey]['total_gross'] += (float)$row['gross'];
-    $locationGroups[$locKey]['total_fee']   += (float)$row['fee'];
-    $locationGroups[$locKey]['total_net']   += (float)$row['net'];
+    foreach ($depositGroups[$groupKey]['donation_ids'] as $donationId) {
+        $requiredGroupsByDonation[(string)$donationId][$groupKey] = true;
+    }
 }
 
-// --- Build and send one Deposit per Location --------------------------------
+// --- Build and send one Deposit per payout date and fund --------------------
 
 $pmStats = ['lines' => 0, 'with_ref' => 0, 'multi' => 0];
+$successfulGroupKeys = [];
+$existingGroupKeys = [];
 if (empty($errors)) {
-    foreach ($locationGroups as $locKey => $group) {
-        $locName = $group['location_name'];
+    foreach ($depositGroups as $groupKey => $group) {
+        $locName    = $group['location_name'];
+        $fundName   = $group['fund_name'];
+        $payoutDate = $group['payout_date'];
 
         $deptRef = null;
         if ($locName !== '') {
@@ -809,7 +791,7 @@ if (empty($errors)) {
             $fundName  = $fundRow['pco_fund_name'];
             $className = $fundRow['qbo_class_name'];
             $fundIncomeName = trim((string)($fundRow['qbo_income_account_name'] ?? ''));
-            $paymentMethods = $fundRow['payment_methods'] ?? [];
+            $methodTotals = $fundRow['method_totals'] ?? [];
 
             $classId = null;
             if ($className) {
@@ -841,62 +823,78 @@ if (empty($errors)) {
                 continue 2;
             }
 
-            $gross = (float)$fundRow['gross'];
-            $fee   = (float)$fundRow['fee'];
+            if (empty($methodTotals)) {
+                $fallbackMethods = $fundRow['payment_methods'] ?? [];
+                $fallbackMethod = count($fallbackMethods) === 1 ? (string)$fallbackMethods[0] : '(unspecified)';
+                $methodTotals = [$fallbackMethod => [
+                    'gross' => (float)$fundRow['gross'],
+                    'fee'   => (float)$fundRow['fee'],
+                ]];
+            }
 
-            $line = [
-                'Amount'     => round($gross, 2),
-                'DetailType' => 'DepositLineDetail',
-                'DepositLineDetail' => [
-                    'AccountRef' => [
-                        'value' => (string)$fundIncomeAccount['Id'],
-                        'name'  => $fundIncomeAccount['Name'] ?? $incomeName,
-                    ],
-                ],
-            ];
-            $pmStats['lines']++;
-            if (is_array($paymentMethods) && count($paymentMethods) === 1) {
-                $pmName = map_payment_method_name($paymentMethods[0]);
-                if ($pmName) {
-                    $pmObj = $qbo->getPaymentMethodByName($pmName);
-                    if ($pmObj) {
-                        $line['DepositLineDetail']['PaymentMethodRef'] = [
-                            'value' => (string)$pmObj['Id'],
-                            'name'  => $pmObj['Name'] ?? $pmName,
-                        ];
-                        $pmStats['with_ref']++;
-                    }
+            foreach ($methodTotals as $pmRaw => $methodAmounts) {
+                $gross = (float)($methodAmounts['gross'] ?? 0.0);
+                $fee   = (float)($methodAmounts['fee'] ?? 0.0);
+                if ($gross == 0.0) {
+                    continue;
                 }
-            } elseif (is_array($paymentMethods) && count($paymentMethods) > 1) {
-                $pmStats['multi']++;
-            }
-            if ($classId !== null) {
-                $line['DepositLineDetail']['ClassRef'] = [
-                    'value' => $classId,
-                    'name'  => $className,
-                ];
-            }
-            $lines[] = $line;
 
-            if ($fee !== 0.0) {
-                $feeLine = [
-                    // QBO Deposit fee lines must be negative
-                    'Amount'     => round($fee * -1, 2),
+                $line = [
+                    'Amount'     => round($gross, 2),
                     'DetailType' => 'DepositLineDetail',
                     'DepositLineDetail' => [
                         'AccountRef' => [
-                            'value' => (string)$feeAccount['Id'],
-                            'name'  => $feeAccount['Name'] ?? $stripeFeeAccountName,
+                            'value' => (string)$fundIncomeAccount['Id'],
+                            'name'  => $fundIncomeAccount['Name'] ?? $incomeName,
                         ],
                     ],
+                    'Description' => $fundName . ' (' . $pmRaw . ') donations | Stripe payout ' . $payoutDate,
                 ];
+                $pmStats['lines']++;
+                if ($pmRaw !== '(unspecified)') {
+                    $pmName = map_payment_method_name((string)$pmRaw);
+                    if ($pmName) {
+                        $pmObj = $qbo->getPaymentMethodByName($pmName);
+                        if ($pmObj) {
+                            $line['DepositLineDetail']['PaymentMethodRef'] = [
+                                'value' => (string)$pmObj['Id'],
+                                'name'  => $pmObj['Name'] ?? $pmName,
+                            ];
+                            $pmStats['with_ref']++;
+                        }
+                    }
+                } else {
+                    $pmStats['multi']++;
+                }
                 if ($classId !== null) {
-                    $feeLine['DepositLineDetail']['ClassRef'] = [
+                    $line['DepositLineDetail']['ClassRef'] = [
                         'value' => $classId,
                         'name'  => $className,
                     ];
                 }
-                $lines[] = $feeLine;
+                $lines[] = $line;
+
+                if ($fee !== 0.0) {
+                    $feeLine = [
+                        // QBO Deposit fee lines must be negative
+                        'Amount'     => round($fee * -1, 2),
+                        'DetailType' => 'DepositLineDetail',
+                        'DepositLineDetail' => [
+                            'AccountRef' => [
+                                'value' => (string)$feeAccount['Id'],
+                                'name'  => $feeAccount['Name'] ?? $stripeFeeAccountName,
+                            ],
+                        ],
+                        'Description' => $fundName . ' (' . $pmRaw . ') Stripe fees | Payout ' . $payoutDate,
+                    ];
+                    if ($classId !== null) {
+                        $feeLine['DepositLineDetail']['ClassRef'] = [
+                            'value' => $classId,
+                            'name'  => $className,
+                        ];
+                    }
+                    $lines[] = $feeLine;
+                }
             }
         }
 
@@ -905,10 +903,9 @@ if (empty($errors)) {
         }
 
         $deposit = [
-            'TxnDate' => $nowUtc->format('Y-m-d'),
-            'PrivateNote' => 'PCO Stripe sync: completed_at ' .
-                $preview['since']->format('Y-m-d H:i:s') . ' to ' .
-                $preview['until']->format('Y-m-d H:i:s') .
+            'TxnDate' => $payoutDate,
+            'PrivateNote' => 'PCO Stripe payout ' . $payoutDate .
+                ' | Fund: ' . $fundName .
                 ($locName ? (' | Location: ' . $locName) : ''),
             'DepositToAccountRef' => [
                 'value' => (string)$bankAccount['Id'],
@@ -921,9 +918,13 @@ if (empty($errors)) {
             $deposit['DepartmentRef'] = $deptRef;
         }
 
-    $fingerprint = build_stripe_deposit_fingerprint($deposit, (string)$locKey);
+    $fingerprint = build_stripe_deposit_fingerprint($deposit, (string)$groupKey);
     if (has_synced_stripe_deposit($pdo, $fingerprint)) {
+        $successfulGroupKeys[$groupKey] = true;
+        $existingGroupKeys[$groupKey] = true;
         $createdDeposits[] = [
+            'payout_date'  => $payoutDate,
+            'fund_name'    => $fundName,
             'location_name' => $locName,
             'total_gross'   => $group['total_gross'],
             'total_fee'     => $group['total_fee'],
@@ -931,15 +932,13 @@ if (empty($errors)) {
             'deposit'       => null,
             'skipped'       => true,
         ];
-        foreach ($group['donation_ids'] as $did) {
-            mark_synced_item($pdo, 'stripe_donation', (string)$did);
-            $alreadySyncedDonations++;
-        }
         continue;
     }
 
     if ($dryRun) {
         $createdDeposits[] = [
+            'payout_date'  => $payoutDate,
+            'fund_name'    => $fundName,
             'location_name' => $locName,
             'total_gross'   => $group['total_gross'],
             'total_fee'     => $group['total_fee'],
@@ -955,11 +954,11 @@ if (empty($errors)) {
         $dep  = $resp['Deposit'] ?? null;
 
         mark_synced_stripe_deposit($pdo, $fingerprint);
-        foreach ($group['donation_ids'] as $did) {
-            mark_synced_item($pdo, 'stripe_donation', (string)$did);
-        }
+        $successfulGroupKeys[$groupKey] = true;
 
         $createdDeposits[] = [
+            'payout_date'  => $payoutDate,
+            'fund_name'    => $fundName,
             'location_name' => $locName,
             'total_gross'   => $group['total_gross'],
             'total_fee'     => $group['total_fee'],
@@ -968,12 +967,27 @@ if (empty($errors)) {
             'skipped'       => false,
         ];
     } catch (Throwable $e) {
-        $errors[] = 'Error creating QBO Deposit for Location ' . ($locName ?: '(no location)') . ': ' . $e->getMessage();
+        $errors[] = 'Error creating QBO Deposit for payout ' . $payoutDate .
+            ', fund ' . $fundName . ', location ' . ($locName ?: '(no location)') . ': ' . $e->getMessage();
     }
     }
 }
 
-if (empty($errors) && (!empty($createdDeposits) || !empty($createdRefunds))) {
+// A donation may contain designations for more than one fund. Mark the source
+// donation complete only after every required payout/fund deposit succeeded (or
+// was already present), so a partial QBO failure cannot lose another fund.
+if (!$dryRun) {
+    foreach ($requiredGroupsByDonation as $donationId => $requiredGroupKeys) {
+        if (!isset($incompleteDonationSet[$donationId]) && empty(array_diff_key($requiredGroupKeys, $successfulGroupKeys))) {
+            mark_synced_item($pdo, 'stripe_donation', (string)$donationId);
+            if (empty(array_diff_key($requiredGroupKeys, $existingGroupKeys))) {
+                $alreadySyncedDonations++;
+            }
+        }
+    }
+}
+
+if (!$dryRun && empty($errors) && (!empty($createdDeposits) || !empty($createdRefunds))) {
     set_setting($pdo, 'last_completed_at', $preview['until']->format(DateTimeInterface::ATOM));
 }
 
@@ -1102,7 +1116,7 @@ if (!empty($errors)): ?>
         <div class="section-header">
             <div>
                 <p class="section-title">Window used</p>
-                <p class="section-sub">completed_at range (<?= htmlspecialchars($displayTz->getName(), ENT_QUOTES, 'UTF-8') ?>)</p>
+                <p class="section-sub">updated_at range (<?= htmlspecialchars($displayTz->getName(), ENT_QUOTES, 'UTF-8') ?>; normal runs include a 14-day overlap)</p>
             </div>
             <div class="muted">
                 Quick window reset:
@@ -1131,14 +1145,16 @@ if (!empty($errors)): ?>
     <div class="card">
         <div class="section-header">
             <div>
-                <p class="section-title">Deposits by Location</p>
-                <p class="section-sub">Created or skipped if already synced</p>
+                <p class="section-title">Deposits by payout date and fund</p>
+                <p class="section-sub">Each transaction contains only one fund type.</p>
             </div>
         </div>
         <div class="table-wrap">
             <table>
                 <thead>
                 <tr>
+                    <th>Payout Date</th>
+                    <th>Fund</th>
                     <th>Location</th>
                     <th>QBO Deposit Id</th>
                     <th>TxnDate</th>
@@ -1155,6 +1171,8 @@ if (!empty($errors)): ?>
                     $skipped = $cd['skipped'] ?? false;
                     ?>
                     <tr>
+                        <td><?= htmlspecialchars((string)($cd['payout_date'] ?? ''), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars((string)($cd['fund_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($cd['location_name'] ?: '(no location)', ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <?php if ($skipped): ?>
@@ -1163,7 +1181,7 @@ if (!empty($errors)): ?>
                                 <?= htmlspecialchars((string)($dep['Id'] ?? ''), ENT_QUOTES, 'UTF-8') ?>
                             <?php endif; ?>
                         </td>
-                        <td><?= $skipped ? '' : htmlspecialchars((string)($dep['TxnDate'] ?? ''), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars((string)($dep['TxnDate'] ?? ($cd['payout_date'] ?? '')), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $skipped ? '' : ('$' . htmlspecialchars((string)($dep['TotalAmt'] ?? ''), ENT_QUOTES, 'UTF-8')) ?></td>
                         <td>$<?= number_format($cd['total_gross'], 2) ?></td>
                         <td>$<?= number_format($cd['total_fee'], 2) ?></td>

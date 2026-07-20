@@ -16,7 +16,12 @@ class SyncService
 
     /**
      * Build a preview of Stripe donations to deposit, optionally skipping donation IDs.
-     * Returns fund aggregates plus donation IDs grouped by location.
+     *
+     * Online donations can be updated several days after they complete when PCO
+     * receives the final Stripe payout/fee details. Use updated_at for the sync
+     * window so those payout updates are not lost behind a completed_at cursor.
+     * Returns aggregates split by weekly payout date and fund. A payout/fund
+     * row becomes one QBO Deposit, so a deposit never mixes fund types.
      */
     public function buildDepositPreview(DateTimeImmutable $sinceUtc, ?DateTimeImmutable $untilUtc = null, array $skipDonationIds = []): array
     {
@@ -27,7 +32,7 @@ class SyncService
 
         $resp = $this->pco->listDonations([
             'per_page' => 100,
-            'order'    => '-completed_at',
+            'order'    => '-updated_at',
             'include'  => 'designations',
         ]);
 
@@ -35,7 +40,9 @@ class SyncService
         $donationCount      = 0;
         $processedDonations = 0;
         $skippedOffline     = 0;
+        $deferredForPayout  = 0;
         $skippedUnmapped    = [];
+        $incompleteDonationIds = [];
 
         // Index "included" designations by type:id
         $includedByKey = [];
@@ -60,7 +67,9 @@ class SyncService
                 'donation_count'      => 0,
                 'processed_donations' => 0,
                 'skipped_offline'     => 0,
+                'deferred_for_payout' => 0,
                 'skipped_unmapped'    => $skippedUnmapped,
+                'incomplete_donation_ids' => [],
                 'donation_ids_by_location' => [],
             ];
         }
@@ -71,15 +80,17 @@ class SyncService
             $rels  = $donation['relationships'] ?? [];
 
             $completedAtStr = $attrs['completed_at'] ?? null;
-            if (!$completedAtStr) {
+            $updatedAtStr   = $attrs['updated_at'] ?? $completedAtStr;
+            if (!$completedAtStr || !$updatedAtStr) {
                 continue;
             }
             try {
                 $completedAt = new DateTimeImmutable($completedAtStr);
+                $updatedAt   = new DateTimeImmutable($updatedAtStr);
             } catch (Throwable $e) {
                 continue;
             }
-            if ($completedAt < $sinceUtc || $completedAt > $nowUtc) {
+            if ($updatedAt < $sinceUtc || $updatedAt > $nowUtc) {
                 continue;
             }
 
@@ -98,6 +109,19 @@ class SyncService
                 $skippedOffline++;
                 continue;
             }
+
+            // This installation receives weekly Stripe payouts on Monday.
+            // PCO updates the donation when the payout/fee details settle. Do
+            // not post a successful gift immediately; wait for that update and
+            // assign it to the date of that payout update.
+            $earliestPayoutAt = $this->getEarliestWeeklyPayoutDate($completedAt);
+            if ($nowUtc < $earliestPayoutAt || $updatedAt < $earliestPayoutAt) {
+                $deferredForPayout++;
+                continue;
+            }
+            // The actual PCO payout update date is the QBO transaction date.
+            // This also handles a bank-holiday delay without forcing Monday.
+            $payoutDate = $updatedAt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d');
 
             $donationCount++;
 
@@ -152,6 +176,7 @@ class SyncService
 
             $remainingFeeCents = $feeCentsAbs;
             $desCount          = count($designationDetails);
+            $donationHasUnmappedFund = false;
 
             foreach ($designationDetails as $idx => $des) {
                 $fundId = $des['fund_id'];
@@ -173,6 +198,7 @@ class SyncService
                 }
 
                 if (!isset($fundMappings[$fundId])) {
+                    $donationHasUnmappedFund = true;
                     $skippedUnmapped[] = [
                         'donation_id'   => $id,
                         'reason'        => "Fund {$fundId} not mapped",
@@ -184,10 +210,11 @@ class SyncService
                 }
 
                 $map = $fundMappings[$fundId];
-                $key = (string)$fundId;
+                $key = $payoutDate . '|' . (string)$fundId;
 
                 if (!isset($fundTotals[$key])) {
                     $fundTotals[$key] = [
+                        'payout_date'       => $payoutDate,
                         'pco_fund_id'       => $fundId,
                         'pco_fund_name'     => $map['pco_fund_name'],
                         'qbo_class_name'    => $map['qbo_class_name'],
@@ -196,6 +223,8 @@ class SyncService
                         'gross_cents'       => 0,
                         'fee_cents'         => 0,
                         'payment_methods'   => [],
+                        'method_totals'     => [],
+                        'donation_ids'      => [],
                     ];
                 }
 
@@ -204,12 +233,26 @@ class SyncService
                 if ($paymentMethod !== '') {
                     $fundTotals[$key]['payment_methods'][$paymentMethod] = true;
                 }
+                $methodKey = $paymentMethod !== '' ? $paymentMethod : '(unspecified)';
+                if (!isset($fundTotals[$key]['method_totals'][$methodKey])) {
+                    $fundTotals[$key]['method_totals'][$methodKey] = [
+                        'gross_cents' => 0,
+                        'fee_cents'   => 0,
+                    ];
+                }
+                $fundTotals[$key]['method_totals'][$methodKey]['gross_cents'] += $gross;
+                $fundTotals[$key]['method_totals'][$methodKey]['fee_cents']   += $feeShareCents;
+                $fundTotals[$key]['donation_ids'][$id] = true;
 
                 $locKey = $map['qbo_location_name'] ?? '__NO_LOCATION__';
                 if (!isset($donationIdsByLocation[$locKey])) {
                     $donationIdsByLocation[$locKey] = [];
                 }
                 $donationIdsByLocation[$locKey][$id] = true;
+            }
+
+            if ($donationHasUnmappedFund) {
+                $incompleteDonationIds[$id] = true;
             }
         }
 
@@ -225,7 +268,19 @@ class SyncService
             $totalGrossCents += $grossCents;
             $totalFeeCents   += $feeCents;
 
+            $methodTotals = [];
+            foreach ($row['method_totals'] ?? [] as $method => $totals) {
+                $methodGrossCents = (int)($totals['gross_cents'] ?? 0);
+                $methodFeeCents   = (int)($totals['fee_cents'] ?? 0);
+                $methodTotals[$method] = [
+                    'gross' => $methodGrossCents / 100.0,
+                    'fee'   => $methodFeeCents / 100.0,
+                    'net'   => ($methodGrossCents - $methodFeeCents) / 100.0,
+                ];
+            }
+
             $fundsOut[] = [
+                'payout_date'       => $row['payout_date'],
                 'pco_fund_id'       => $row['pco_fund_id'],
                 'pco_fund_name'     => $row['pco_fund_name'],
                 'qbo_class_name'    => $row['qbo_class_name'],
@@ -235,11 +290,13 @@ class SyncService
                 'fee'               => $feeCents / 100.0,
                 'net'               => $netCents / 100.0,
                 'payment_methods'   => array_keys($row['payment_methods'] ?? []),
+                'method_totals'     => $methodTotals,
+                'donation_ids'      => array_keys($row['donation_ids'] ?? []),
             ];
         }
 
         usort($fundsOut, function (array $a, array $b): int {
-            return strcmp($a['pco_fund_name'], $b['pco_fund_name']);
+            return [$a['payout_date'], $a['pco_fund_name']] <=> [$b['payout_date'], $b['pco_fund_name']];
         });
 
         return [
@@ -252,9 +309,25 @@ class SyncService
             'donation_count'      => $donationCount,
             'processed_donations' => $processedDonations,
             'skipped_offline'     => $skippedOffline,
+            'deferred_for_payout' => $deferredForPayout,
             'skipped_unmapped'    => $skippedUnmapped,
+            'incomplete_donation_ids' => array_keys($incompleteDonationIds),
             'donation_ids_by_location' => array_map('array_keys', $donationIdsByLocation),
         ];
+    }
+
+    /**
+     * Return the earliest scheduled weekly payout date: the first Monday after
+     * completion, at midnight UTC. The donation is held until PCO updates it on
+     * or after this boundary; that update's date becomes the actual payout date.
+     */
+    private function getEarliestWeeklyPayoutDate(DateTimeImmutable $completedAt): DateTimeImmutable
+    {
+        $utc = new DateTimeZone('UTC');
+        return $completedAt
+            ->setTimezone($utc)
+            ->setTime(0, 0, 0)
+            ->modify('next monday');
     }
 
     /**

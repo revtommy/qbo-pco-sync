@@ -58,7 +58,7 @@ try {
 $service = new SyncService($pdo, $pco);
 $displayTz = get_display_timezone($pdo);
 
-// days back to look based on completed_at
+// days back to look based on updated_at (Stripe payout/fee updates can be delayed)
 $days = isset($_GET['days']) ? (int)$_GET['days'] : 7;
 if ($days < 1) {
     $days = 1;
@@ -304,7 +304,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
         <div>
             <div class="eyebrow">Preview</div>
             <h1>PCO to QuickBooks sync preview</h1>
-            <p class="lede">Inspect online donations by completed_at window before pushing to QuickBooks deposits.</p>
+            <p class="lede">Inspect online donations by updated_at window before pushing to QuickBooks deposits.</p>
         </div>
         <a class="btn secondary" href="index.php">&larr; Back to dashboard</a>
     </div>
@@ -313,7 +313,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
         <div class="section-header">
             <div>
                 <p class="section-title">Window and filters</p>
-                <p class="section-sub">payment_status = succeeded, completed_at within the selected range.</p>
+                <p class="section-sub">Successful online gifts are held until their Monday payout update, then split into one QBO deposit per payout date and fund.</p>
             </div>
             <form method="get" class="filters">
                 <label for="days">Days back</label>
@@ -342,6 +342,10 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
             <div class="metric">
                 <div class="label">Offline donations skipped</div>
                 <div class="value"><?= (int)$preview['skipped_offline'] ?></div>
+            </div>
+            <div class="metric">
+                <div class="label">Waiting for payout</div>
+                <div class="value"><?= (int)($preview['deferred_for_payout'] ?? 0) ?></div>
             </div>
             <div class="metric">
                 <div class="label">Net (expected payout)</div>
@@ -389,14 +393,15 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
         <div class="card">
             <div class="section-header">
                 <div>
-                    <p class="section-title">Per-fund breakdown</p>
-                    <p class="section-sub">Future QuickBooks deposit lines per fund.</p>
+                    <p class="section-title">Deposits by payout and fund</p>
+                    <p class="section-sub">Each row will become a separate QuickBooks deposit.</p>
                 </div>
             </div>
             <div class="table-wrap">
                 <table>
                     <thead>
                     <tr>
+                        <th>Payout Date</th>
                         <th>PCO Fund</th>
                         <th>QBO Class</th>
                         <th>QBO Location</th>
@@ -409,6 +414,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
                     <tbody>
                     <?php foreach ($preview['funds'] as $row): ?>
                         <tr>
+                            <td><?= htmlspecialchars((string)$row['payout_date'], ENT_QUOTES, 'UTF-8') ?></td>
                             <td>
                                 <?= htmlspecialchars($row['pco_fund_name'], ENT_QUOTES, 'UTF-8') ?><br>
                                 <span class="small">Fund ID: <?= htmlspecialchars((string)$row['pco_fund_id'], ENT_QUOTES, 'UTF-8') ?></span>
@@ -424,7 +430,7 @@ $refundPreview   = $service->buildRefundPreview($sinceUtc, $nowUtc, $syncedRefun
                     </tbody>
                     <tfoot>
                     <tr>
-                        <th colspan="4">Totals</th>
+                        <th colspan="5">Totals</th>
                         <th>$<?= number_format($preview['total_gross'], 2) ?></th>
                         <th>$<?= number_format($preview['total_fee'], 2) ?></th>
                         <th>$<?= number_format($preview['total_net'], 2) ?></th>

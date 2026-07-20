@@ -4,7 +4,7 @@ Bridge Planning Center Giving data (Stripe payouts, committed batches, and Regis
 
 ## What it does
 - Connects to QuickBooks Online via OAuth and stores refresh/access tokens.
-- Stripe online donations → QBO Deposits (income + fee lines) grouped by fund/class/location; payment method refs set when available.
+- Stripe online donations → QBO Deposits (income + fee lines) grouped by weekly Monday payout date and fund; a QBO deposit never mixes fund types. Class/location and payment method refs are applied when available.
 - PCO Giving committed batches (cash/check) → QBO Deposits grouped by location; per-payment-method deposit lines.
 - PCO Registrations payments → QBO Deposits; refunds → QBO expenses using configured refund account.
 - Previews for Stripe, batches, and registrations show only unsynced items (per-item tracking in `synced_items`). Refunds dedupe by fingerprint.
@@ -52,7 +52,7 @@ Bridge Planning Center Giving data (Stripe payouts, committed batches, and Regis
 
 ## Usage
 - **Dashboard**: `index.php` shows connection status and links to previews/syncs.
-- **Stripe (online donations)**: preview `run-sync-preview.php`; sync `run-sync.php` (supports `reset_window`/`backfill_days`).
+- **Stripe (online donations)**: preview `run-sync-preview.php`; sync `run-sync.php` (supports `reset_window`/`backfill_days`). The sync waits for PCO's weekly Monday payout update, groups gifts by payout date, and creates a separate QBO deposit for each fund. It windows on `updated_at` and rechecks a 14-day overlap because PCO can add final Stripe payout/fee details days after a donation completes; per-donation tracking prevents duplicates.
 - **Committed batches (cash/check)**: preview `run-batch-preview.php`; sync `run-batch-sync.php`.
 - **Registrations**: preview `run-registrations-preview.php`; sync `run-registrations-sync.php`. Refunds post as expenses to the configured refund account (or income fallback) with class/department applied.
 - **Fund mappings**: `fund-mapping.php` maps PCO fund → QBO Class/Location/Income Account.

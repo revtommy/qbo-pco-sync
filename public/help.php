@@ -81,7 +81,7 @@ declare(strict_types=1);
         <h2>Support</h2>
         <p>Assistance is offered as time permits.</p>
         <p>Contact: Rev. Tommy Sheppard ? <a href="mailto:tdsheppard77@gmail.com">tdsheppard77@gmail.com</a></p>
-        <p class="muted">Feature requests or issues: please use the GitHub issue queue at <a href="https://github.com/dsuguy2007/qbo-pco-sync" target="_blank" rel="noopener noreferrer">github.com/dsuguy2007/qbo-pco-sync</a>.</p>
+        <p class="muted">Feature requests or issues: please use the GitHub issue queue at <a href="https://github.com/revtommy/qbo-pco-sync" target="_blank" rel="noopener noreferrer">github.com/revtommy/qbo-pco-sync</a>.</p>
 
         <a class="nav" href="index.php">&larr; Back to dashboard</a>
     </div>

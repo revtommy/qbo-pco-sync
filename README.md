@@ -21,7 +21,7 @@ Bridge Planning Center Giving data (Stripe payouts, committed batches, and Regis
 
 ## Install and configure
 1) **Clone and dependencies**
-   - `git clone https://github.com/dsuguy2007/qbo-pco-sync.git`
+   - `git clone https://github.com/revtommy/qbo-pco-sync.git`
    - `cd qbo-pco-sync`
    - Run `composer install` to pull PHPMailer (needed for SMTP email). Ensure `vendor/autoload.php` exists before production use.
 
